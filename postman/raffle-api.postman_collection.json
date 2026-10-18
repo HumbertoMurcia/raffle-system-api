@@ -1,0 +1,1418 @@
+{
+  "info": {
+    "_postman_id": "72043f43-5dcc-4e00-9478-e11ef1757894",
+    "name": "Raffle System API",
+    "description": "Raffle ticket API (Bun + Elysia + Difunkt + SQLite).\n\nRun the whole collection top to bottom against a freshly seeded server:\n\n    bun install && bun run dev\n\nEvery request carries assertions, so a full run is an end-to-end check of the API, including the three guarantees that matter most:\n\n1. a raffle never sells more tickets than exist;\n2. a retried purchase is never charged twice;\n3. ticket numbers are unique within a raffle.\n\nThe `3. Tickets` folder proves (2) interactively: it buys, retries with the same `Idempotency-Key`, and then checks the balance moved exactly once.\n\nCollection-level auth is a bearer token captured by `1. Auth > Log in as Alice`. Requests that must be anonymous override it to `No Auth`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "adminKey",
+      "value": "dev-admin-key",
+      "type": "string"
+    },
+    {
+      "key": "aliceEmail",
+      "value": "alice@example.com",
+      "type": "string"
+    },
+    {
+      "key": "carolEmail",
+      "value": "carol@example.com",
+      "type": "string"
+    },
+    {
+      "key": "raffleId",
+      "value": "raf_rig",
+      "type": "string"
+    },
+    {
+      "key": "draftRaffleId",
+      "value": "raf_coffee",
+      "type": "string"
+    },
+    {
+      "key": "pastDrawRaffleId",
+      "value": "raf_console",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "carolToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "idempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "balanceBefore",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "totalCost",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "paymentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "purchasedNumbers",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Liveness probe. Run this first to confirm the server is up.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "pm.test('reports ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Log in as Alice",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Mock login: a known seeded email is enough. The token itself is real: HMAC-SHA256 signed with an expiry.\n\nStores the token in the `token` collection variable, which every authenticated request below uses.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{aliceEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('returns a bearer token and the account', () => {",
+                  "  pm.expect(body.token).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.user.email).to.eql(pm.collectionVariables.get('aliceEmail'));",
+                  "  pm.expect(body.user.balance).to.be.a('number');",
+                  "});",
+                  "pm.collectionVariables.set('token', body.token);",
+                  "pm.collectionVariables.set('userId', body.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log in as Carol (zero balance)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Carol is seeded with a balance of 0, used by the insufficient-funds case.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{carolEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Carol has nothing to spend', () => pm.expect(body.user.balance).to.eql(0));",
+                  "pm.collectionVariables.set('carolToken', body.token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log in with an unknown email (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Unknown accounts are refused without revealing whether they exist.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"nobody@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 401', () => pm.response.to.have.status(401));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('UNAUTHORIZED');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Browse raffles",
+      "item": [
+        {
+          "name": "List active raffles",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/raffles",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles"
+              ]
+            },
+            "description": "Public. Defaults to `active`; pass `?status=` for another slice, or `all`.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const { data } = pm.response.json();",
+                  "pm.test('only active raffles are listed', () => {",
+                  "  pm.expect(data).to.be.an('array').that.is.not.empty;",
+                  "  data.forEach(r => pm.expect(r.status).to.eql('active'));",
+                  "});",
+                  "pm.test('each raffle exposes its prize and remaining capacity', () => {",
+                  "  data.forEach(r => {",
+                  "    pm.expect(r.prize.name).to.be.a('string');",
+                  "    pm.expect(r.ticketsRemaining).to.eql(r.maxTickets - r.ticketsSold);",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List draft raffles",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/raffles?status=draft",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "draft"
+                }
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "pm.test('the draft raffle is not in the public listing', () => {",
+                  "  const { data } = pm.response.json();",
+                  "  data.forEach(r => pm.expect(r.status).to.eql('draft'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get one raffle",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const raffle = pm.response.json();",
+                  "pm.test('returns the raffle with its prize', () => {",
+                  "  pm.expect(raffle.id).to.eql(pm.collectionVariables.get('raffleId'));",
+                  "  pm.expect(raffle.prize).to.be.an('object');",
+                  "  pm.expect(raffle.ticketPrice).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get a raffle that does not exist (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/raf_nope",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "raf_nope"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 404', () => pm.response.to.have.status(404));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('NOT_FOUND');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unmatched route (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/does-not-exist",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "does-not-exist"
+              ]
+            },
+            "description": "Even unrouted requests come back in the standard envelope.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 404', () => pm.response.to.have.status(404));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('ROUTE_NOT_FOUND');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Tickets (purchase + retry safety)",
+      "description": "Run top to bottom: this folder demonstrates that a retried purchase is charged once.",
+      "item": [
+        {
+          "name": "Get me (capture balance)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "me"
+              ]
+            },
+            "description": "Records the starting balance so the purchase below can be checked exactly."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const me = pm.response.json();",
+                  "pm.collectionVariables.set('balanceBefore', me.balance);",
+                  "pm.test('returns the authenticated account', () => {",
+                  "  pm.expect(me.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Purchase 2 tickets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "`Idempotency-Key` is required. The pre-request script generates a fresh GUID; the next request reuses it on purpose.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('is a fresh charge, not a replay', () => {",
+                  "  pm.expect(body.replayed).to.be.false;",
+                  "  pm.expect(pm.response.headers.get('idempotent-replay')).to.eql('false');",
+                  "});",
+                  "pm.test('issues 2 tickets with unique, consecutive numbers', () => {",
+                  "  const numbers = body.tickets.map(t => t.ticketNumber);",
+                  "  pm.expect(numbers).to.have.lengthOf(2);",
+                  "  pm.expect(new Set(numbers).size).to.eql(2);",
+                  "  pm.expect(numbers[1]).to.eql(numbers[0] + 1);",
+                  "});",
+                  "pm.test('one purchase is one payment', () => {",
+                  "  pm.expect(new Set(body.tickets.map(t => t.paymentId)).size).to.eql(1);",
+                  "  body.tickets.forEach(t => pm.expect(t.status).to.eql('confirmed'));",
+                  "});",
+                  "pm.test('debits price x quantity', () => {",
+                  "  const before = Number(pm.collectionVariables.get('balanceBefore'));",
+                  "  pm.expect(body.remainingBalance).to.eql(before - body.totalCost);",
+                  "});",
+                  "pm.collectionVariables.set('totalCost', body.totalCost);",
+                  "pm.collectionVariables.set('paymentId', body.paymentId);",
+                  "pm.collectionVariables.set('purchasedNumbers', JSON.stringify(body.tickets.map(t => t.ticketNumber)));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retry the same purchase, same key (replayed, not charged)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "Identical request, identical key: what a client does after a timeout. The original result is replayed; no slot is claimed and no money moves.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 201 with the original result', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('is flagged as a replay', () => {",
+                  "  pm.expect(body.replayed).to.be.true;",
+                  "  pm.expect(pm.response.headers.get('idempotent-replay')).to.eql('true');",
+                  "});",
+                  "pm.test('returns the original tickets and payment, not new ones', () => {",
+                  "  pm.expect(body.paymentId).to.eql(pm.collectionVariables.get('paymentId'));",
+                  "  pm.expect(body.tickets.map(t => t.ticketNumber))",
+                  "    .to.eql(JSON.parse(pm.collectionVariables.get('purchasedNumbers')));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reuse the key for a different quantity (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "Same key, different request. Silently replaying the wrong purchase would be worse than refusing.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 9\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 409', () => pm.response.to.have.status(409));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('IDEMPOTENCY_KEY_REUSED');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Purchase without an idempotency key (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "The key is required: a purchase moves money and must be retry-safe.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 422', () => pm.response.to.have.status(422));",
+                  "pm.test('names the missing header', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('VALIDATION_ERROR');",
+                  "  pm.expect(body.error.details[0].path).to.eql('/idempotency-key');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Purchase an invalid quantity (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 422', () => pm.response.to.have.status(422));",
+                  "pm.test('names the offending field', () => {",
+                  "  pm.expect(pm.response.json().error.details[0].path).to.eql('/quantity');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get me (charged exactly once)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "me"
+              ]
+            },
+            "description": "The decisive check: two purchase attempts, one debit."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "pm.test('the balance moved exactly once', () => {",
+                  "  const before = Number(pm.collectionVariables.get('balanceBefore'));",
+                  "  const cost = Number(pm.collectionVariables.get('totalCost'));",
+                  "  pm.expect(pm.response.json().balance).to.eql(before - cost);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get my tickets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/me/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "me",
+                "tickets"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const { data } = pm.response.json();",
+                  "pm.test('the purchased tickets are owned by me', () => {",
+                  "  const mine = data.filter(t => t.paymentId === pm.collectionVariables.get('paymentId'));",
+                  "  pm.expect(mine).to.have.lengthOf(2);",
+                  "  mine.forEach(t => pm.expect(t.userId).to.eql(pm.collectionVariables.get('userId')));",
+                  "});",
+                  "pm.test('no two tickets of mine share a number within a raffle', () => {",
+                  "  const seen = new Set(data.map(t => `${t.raffleId}#${t.ticketNumber}`));",
+                  "  pm.expect(seen.size).to.eql(data.length);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Business rules (expected failures)",
+      "item": [
+        {
+          "name": "Buy with an empty balance (402)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{carolToken}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{raffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{raffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "Carol has 0 cents. Nothing is sold and nothing is reserved.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 402', () => pm.response.to.have.status(402));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('INSUFFICIENT_BALANCE');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.test('reports what was needed and what was available', () => {",
+                  "  const d = pm.response.json().error.details;",
+                  "  pm.expect(d.required).to.be.a('number');",
+                  "  pm.expect(d.available).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Buy into a draft raffle (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{draftRaffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{draftRaffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "A raffle must be `active` to sell tickets.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 409', () => pm.response.to.have.status(409));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('RAFFLE_NOT_ACTIVE');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Buy into a raffle past its draw date (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{pastDrawRaffleId}}/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{pastDrawRaffleId}}",
+                "tickets"
+              ]
+            },
+            "description": "Sales stop at the draw date. Once the scheduler has drawn this raffle the code becomes RAFFLE_NOT_ACTIVE instead: both are 409.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 409', () => pm.response.to.have.status(409));",
+                  "pm.test('refuses with a draw-related rule', () => {",
+                  "  const code = pm.response.json().error.code;",
+                  "  pm.expect(['RAFFLE_DRAW_DATE_PASSED', 'RAFFLE_NOT_ACTIVE']).to.include(code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Buy an unknown raffle (404)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/raf_nope/tickets",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "raf_nope",
+                "tickets"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A new key for a new purchase. The retry request below deliberately",
+                  "// reuses whatever this leaves in the collection variable.",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 404', () => pm.response.to.have.status(404));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('NOT_FOUND');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Access /me without a token (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "me"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 401', () => pm.response.to.have.status(401));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('UNAUTHORIZED');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Access /me with a forged token (401)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer eyJzdWIiOiJ1c3JfYWxpY2UifQ.deadbeef"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "me"
+              ]
+            },
+            "description": "The signature is checked before the payload is trusted.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 401', () => pm.response.to.have.status(401));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('UNAUTHORIZED');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Admin: the draw",
+      "item": [
+        {
+          "name": "Run the draw without the admin key (403)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/draws/run",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "draws",
+                "run"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 403', () => pm.response.to.have.status(403));",
+                  "pm.test('uses the standard error envelope', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('FORBIDDEN');",
+                  "  pm.expect(body.error.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Run the draw for every due raffle",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-admin-key",
+                "value": "{{adminKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/draws/run",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "draws",
+                "run"
+              ]
+            },
+            "description": "The draw normally runs on a schedule (every 30s). This triggers it on demand. Idempotent: a second run finds nothing left to draw.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const { data } = pm.response.json();",
+                  "pm.test('every result is a recognised outcome', () => {",
+                  "  pm.expect(data).to.be.an('array');",
+                  "  data.forEach(r => pm.expect(['drawn', 'closed_no_entries', 'skipped']).to.include(r.outcome));",
+                  "});",
+                  "pm.test('a drawn raffle names its winning ticket', () => {",
+                  "  data.filter(r => r.outcome === 'drawn').forEach(r => {",
+                  "    pm.expect(r.winningTicketId).to.be.a('string');",
+                  "    pm.expect(r.winnerUserId).to.be.a('string');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Draw a single raffle",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-admin-key",
+                "value": "{{adminKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/raffles/{{pastDrawRaffleId}}/draw",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "raffles",
+                "{{pastDrawRaffleId}}",
+                "draw"
+              ]
+            },
+            "description": "`raf_console` is seeded past its draw date with 3 tickets. Whether the scheduler got there first or not, it ends up drawn exactly once.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const result = pm.response.json();",
+                  "pm.test('is drawn, or already was', () => {",
+                  "  pm.expect(['drawn', 'skipped']).to.include(result.outcome);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm the winner was recorded",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/raffles/{{pastDrawRaffleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "raffles",
+                "{{pastDrawRaffleId}}"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responds 200', () => pm.response.to.have.status(200));",
+                  "const raffle = pm.response.json();",
+                  "pm.test('the raffle is drawn and holds a winning ticket', () => {",
+                  "  pm.expect(raffle.status).to.eql('drawn');",
+                  "  pm.expect(raffle.winningTicketId).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
